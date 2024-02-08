@@ -1,0 +1,192 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+  word_document: default
+---
+
+# 4.
+
+## (a).
+
+```{r message=FALSE, warning=FALSE}
+library(readxl)
+library(ggplot2)
+library(lubridate)
+library(tidyverse)
+library(jrvFinance)
+```
+
+```{r}
+data <- read_excel("data.xlsx")
+colnames(data)[6:16] = as.character(as.Date(as.numeric(colnames(data)[6:16]), origin = "1900-01-01"))
+```
+
+```{r}
+cleaned_data = data[,c(2,3,5:15)]%>%
+  mutate(CouponTimes = (1:10))%>%
+  gather(key = 'date', value = 'price', -c('CouponRate','ISIN', 'CouponTimes','MaturityDate'))%>%
+  mutate(MaturityDate = as.Date(MaturityDate, format = '%m/%d/%Y'))%>%
+  mutate(time_to_pay = as.numeric(interval(date, MaturityDate))/(60*60*24)/365)%>%
+  mutate(year = CouponTimes/2)
+  #mutate(YTM = (100 - price + (CouponRate/2)*100*CouponTimes)/(price * time_to_pay))
+
+YTM = c()
+for (i in 1:nrow(cleaned_data)) {
+  YTM = append(
+    YTM,
+    bond.yield(as.Date(cleaned_data$date[i]), cleaned_data$MaturityDate[i], cleaned_data$CouponRate[i], price = cleaned_data$price[i] ,freq = 2)
+    )
+}
+
+cleaned_data$YTM = YTM
+  
+ggplot(data = cleaned_data, mapping = aes(x = year, y = YTM, color = date))+
+  geom_line()+
+  theme_bw()+
+  xlab('Years')+
+  labs(title = '5-Year Yield Curve')+
+  scale_colour_hue()
+```
+
+## (b).
+### pseudo-code
+```{r eval=FALSE}
+for all bonds in bonds_data
+
+  if(maturity_time < 0.5 year)
+    then: spot_rate = YTM
+    else: spot_rate = (final_payment/(price - sum(coupon/(1+previous_spot_rate)^t)))^(1/T) -1
+  
+end for
+
+spot_rate = (PV-price)/price*maturity_time
+
+df_spot_rate = make_data.frame(spot_rate)
+
+plot(df_spot_rate, group_by(trading_day))
+```
+
+### R CODE
+```{r}
+spot_rate_vec = c()
+
+for (j in 1:10) {
+  sub_data = cleaned_data[((j - 1) * 10 + 1):((j - 1) * 10 + 10), ]
+  
+  spot_rate = rep(0, 10)
+  dirty_price = rep(0, 10)
+  
+  dirty_price[1] = bond.TCF(sub_data$date[1], sub_data$MaturityDate[1], 
+                              sub_data$CouponRate[1], 2)$accrued + sub_data$price[1]
+  
+  spot_rate[1] = -1*log(as.numeric(dirty_price[1])/(100 + 100*sub_data$CouponRate[1]/2 ))/sub_data$time_to_pay[1]
+  
+  for (i in 2:10) {
+    dirty_price[i] = bond.TCF(sub_data$date[i], sub_data$MaturityDate[i], 
+                              sub_data$CouponRate[i], 2)$accrued + sub_data$price[i]
+    
+    pv = (100*sub_data$CouponRate[i] / 2) * exp(-spot_rate[i-1] * sub_data$time_to_pay[i-1])
+    spot_rate[i] = -1*log(as.numeric(dirty_price[i] - pv)/(100 + 100*sub_data$CouponTimes[i]* sub_data$CouponRate[i]/2))/sub_data$time_to_pay[i]
+  }
+  
+  spot_rate_vec = append(spot_rate_vec, spot_rate)
+}
+
+cleaned_data$spot_rate = spot_rate_vec
+
+ggplot(data = cleaned_data, mapping = aes(x = year, y = spot_rate, color = date))+
+  geom_line()+
+  theme_bw()+
+  xlab('Years')+
+  labs(title = '5-Year Spot Rate')+
+  scale_colour_hue()
+```
+
+## (c).
+
+### pseudo-code
+```{r eval=FALSE}
+new_bonds_data =  filter(bonds.maturity_time in c(1,2,3,4,5) )
+
+for each trading_day in new_bonds_data:
+  benchmark_rate = spot_rate[year == 1]
+  for other spot_rates:
+    forward_rate = (spot_rate*year - benchmark_rate*1)/(year - 1)
+  end for 
+end for
+
+df_forward_rate = make_data.frame(forward_rate)
+  
+plot(df_forward_rate, group_by(trading_day))
+```
+
+### R CODE
+```{r}
+cleaned_data_2 = cleaned_data%>%
+  filter(year %in% c(1,2,3,4,5))%>%
+  group_by(date)%>%
+  mutate(forward_rate = (YTM*year - first(YTM))/(year-1) )%>%
+  filter(is.na(forward_rate) == F)%>%
+  filter(forward_rate != 0)
+
+ggplot(data = cleaned_data_2, mapping = aes(x = year, y = forward_rate, color = date))+
+  geom_line()+
+  theme_bw()+
+  xlab('Years')+
+  labs(title = 'Forward Rate')+
+  scale_colour_hue()
+```
+
+
+# 5
+
+## Yield
+```{r}
+cleaned_data_3 = cleaned_data%>%
+  filter(year %in% c(1,2,3,4,5))%>%
+  select('ISIN','date','YTM')%>%
+  spread(key = date, value = YTM)
+  
+cleaned_data_3 = as.data.frame(t(cleaned_data_3)[-1,])
+cleaned_data_3 = apply(cleaned_data_3, 2, as.numeric)
+
+yield_mat = log(cleaned_data_3[2:10,]/cleaned_data_3[1:9,])
+```
+
+```{r}
+(yield_covmat = cov(yield_mat))
+```
+
+## Forward
+```{r}
+cleaned_data_4 = cleaned_data_2%>%
+  select('ISIN','date','forward_rate')%>%
+  spread(key = date, value = forward_rate)
+
+cleaned_data_4 = as.data.frame(t(cleaned_data_4)[-1,])
+cleaned_data_4 = apply(cleaned_data_4, 2, as.numeric)
+forward_rate_mat = log(cleaned_data_4[2:10,]/cleaned_data_4[1:9,])
+```
+
+```{r}
+(f_covmat = cov(forward_rate_mat))
+```
+
+# 6
+
+```{r}
+(eval_y <- eigen(yield_covmat)$values) # eigenvalue
+
+(evec_y <- eigen(yield_covmat)$vectors) # eigenvector
+```
+
+```{r}
+(eval_f <- eigen(f_covmat)$values) # eigenvalue
+
+(evec_f <- eigen(f_covmat)$vectors) # eigenvector
+```
+
+The first eigenvector illustrate in what 'direction' does the data variate the most, and its corresponding eigenvalue shows the magnitude of variance projected in this 'direction'.
+
